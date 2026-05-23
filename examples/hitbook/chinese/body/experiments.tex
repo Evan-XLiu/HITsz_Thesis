@@ -1,0 +1,218 @@
+% !Mode:: "TeX:UTF-8"
+
+\chapter{实验设计与结果分析}[Experiments and Analysis]
+
+在前两章分别完成专家数据处理与强化学习动作跟踪方法设计之后，本章的任务是通过系统实验验证所提方法的有效性，并分析策略在不同动作类型和不同测试条件下的实际表现。由于本文当前工作主要聚焦于仿真环境中的人形机器人运动技能学习，因此实验部分将重点围绕动作跟踪精度、训练稳定性、鲁棒性和泛化性开展，对参考轨迹质量、奖励设计、训练机制以及抗扰表现进行系统评估，从而检验前述方法在典型运动任务中的实际效果。
+
+\section{实验设置与评价方法}[Experimental setup and evaluation metrics]
+
+为了验证本文提出的专家数据预处理与强化学习动作跟踪方法的有效性，本章从动作跟踪精度、训练稳定性、鲁棒性和泛化性四个方面开展实验分析。实验的核心目标包括：第一，验证所构建的参考轨迹能否支持机器人稳定学习目标动作；第二，评估所设计的奖励函数与稳定化机制是否能提升动作跟踪质量；第三，观察策略在扰动、噪声和环境变化条件下的表现。
+
+考虑到本文当前研究重点主要放在仿真环境中的运动学习与方法验证，因此实验章节以高保真物理仿真测试为主。实验任务覆盖了 CR7、jump forward、walk、single foot balance、play the violin 和 play basketball 六类具有代表性的全身动作场景，既包含对身体平衡性要求较高的静态或准静态动作，也包含对关节协调性、节奏性和动态跟踪能力要求更高的快速动作。
+
+\noindent\textbf{实验平台与参数设置}
+
+本文实验基于 Isaac Gym 仿真平台搭建动作跟踪环境\cite{isaacgym2021}。机器人模型由 URDF 或 MJCF 文件描述，环境中配置了关节驱动参数、接触碰撞模型、地面摩擦参数和批量并行训练接口。实验中所用参考轨迹来源于第 3 章得到的机器人动作库，训练算法采用第 4 章所述 PPO 优化目标和非对称 Actor-Critic 网络结构。
+
+在训练设置上，本文给定并记录了并行环境数量、控制频率、策略更新周期、折扣因子、学习率、PPO 截断系数以及广义优势估计（Generalized Advantage Estimation, GAE）系数等超参数。相关训练参数如表~\ref{tab:training_hyperparams} 所示。
+
+\begin{table}[htbp]
+  \centering
+  \caption{强化学习训练关键超参数设置}
+  \label{tab:training_hyperparams}
+  \vspace{0.5em}\centering\wuhao
+  \begin{tabular}{ll}
+  % \begin{tabular}{p{0.28\textwidth}p{0.6\textwidth}}
+    \toprule
+    参数名称 & 取值或说明 \\
+    \midrule
+    仿真平台 & Isaac Gym \\
+    并行环境数量 & 4096 \\
+    仿真频率 / 仿真步长 & 200\,Hz / 0.005\,s \\
+    控制频率 / 控制周期 & 50\,Hz / 0.02\,s \\
+    控制降采样系数 & 4 \\
+    PPO 学习率 & $1\times 10^{-3}$ \\
+    折扣因子 $\gamma$ & 0.99 \\
+    GAE 系数 $\lambda$ & 0.95 \\
+    截断系数 $\epsilon$ & 0.2 \\
+    PPO 更新轮数 & 5 \\
+    mini-batch 数量 & 4 \\
+    每环境 rollout 步长 & 24 \\
+    单次更新样本数 & 98304 \\
+    历史观测步长 $h$ & 4 帧 \\
+    最大回合时长 & 20\,s \\
+    训练总迭代轮数 & 1000000 \\
+    模型保存间隔 & 100 \\
+    域随机化 & False \\
+    动作重采样 & False \\
+    终止条件课程学习 & True \\
+    终止距离阈值最小值 & 0.3 \\
+    终止课程学习系数 & $2.5\times 10^{-5}$ \\
+    奖励惩罚课程学习 & True \\
+    奖励惩罚课程学习系数 & $1\times 10^{-5}$ \\
+    自碰撞设置 & 0 \\
+    控制器类型 & P \\
+    动作缩放系数 & 0.25 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\noindent\textbf{评价指标}
+
+为全面评估动作跟踪效果，本文采用位置误差、姿态误差、速度误差和任务成功率等指标。设测试集中共有 $N$ 段动作，每段动作长度为 $T$，第 $i$ 个关键点在第 $t$ 帧的仿真位置与参考位置分别为 $\hat{x}_{i,t}$ 和 $x_{i,t}$，则全局平均关键点位置误差可表示为
+\begin{equation}
+E_{\mathrm{g\text{-}mpjpe}}
+=
+\frac{1}{NT|\mathcal{B}|}
+\sum_{n=1}^{N}\sum_{t=1}^{T}\sum_{i\in\mathcal{B}}
+\left\|
+\hat{x}_{i,t}-x_{i,t}
+\right\|_2,
+\end{equation}
+其中 $\mathcal{B}$ 为用于评估的关键刚体集合。
+
+若在消除根节点平移影响后再计算各关键点误差，则得到根相对平均关节位置误差：
+\begin{equation}
+E_{\mathrm{mpjpe}}
+=
+\frac{1}{NT|\mathcal{B}|}
+\sum_{n=1}^{N}\sum_{t=1}^{T}\sum_{i\in\mathcal{B}}
+\left\|
+\left(\hat{x}_{i,t}-\hat{x}_{\mathrm{root},t}\right)
+-
+\left(x_{i,t}-x_{\mathrm{root},t}\right)
+\right\|_2.
+\end{equation}
+
+此外，还可分别统计速度误差与加速度误差：
+\begin{equation}
+E_{\mathrm{vel}}
+=
+\frac{1}{NT}
+\sum_{n=1}^{N}\sum_{t=1}^{T}
+\left\|
+\hat{v}_t-v_t
+\right\|_2,
+\quad
+E_{\mathrm{acc}}
+=
+\frac{1}{NT}
+\sum_{n=1}^{N}\sum_{t=1}^{T}
+\left\|
+\hat{a}_t-a_t
+\right\|_2.
+\end{equation}
+
+若将成功完成整段动作定义为“回合内未发生提前终止，且平均关键点误差始终低于给定阈值”，则成功率可定义为
+\begin{equation}
+\mathrm{SR}
+=
+\frac{1}{N}
+\sum_{n=1}^{N}
+\mathbb{I}(\text{episode } n \text{ success}),
+\end{equation}
+其中 $\mathbb{I}(\cdot)$ 为示性函数。上述指标分别从“空间位置对齐”“局部姿态精度”“运动学连续性”和“任务完成稳定性”四个角度评价策略性能。
+
+\section{主要实验结果与案例分析}[Main results and case study]
+
+首先，对本文方法在六类代表性动作上的主实验结果进行统计。实验结果按照“动作类别 - 关键指标”的形式整理，如表~\ref{tab:main_tracking_results} 所示。整体来看，低动态和周期性动作通常更容易获得较低误差，而腾空、落地和快速上肢摆动较多的复杂动作对策略稳定性提出了更高要求。
+
+\begin{table}[htbp]
+  \centering
+  \caption{主要动作跟踪实验结果}
+  \label{tab:main_tracking_results}
+  \vspace{0.5em}\centering\wuhao
+  \begin{tabular}{lccccc}
+    \toprule
+    动作名称 & $E_{\mathrm{g\text{-}mpjpe}}$ & $E_{\mathrm{mpjpe}}$ & $E_{\mathrm{vel}}$ & $E_{\mathrm{acc}}$ & 成功率 \\
+    \midrule
+    CR7 & 0.102 & 0.071 & 0.189 & 0.842 & 91.3\% \\
+    jump forward & 0.136 & 0.094 & 0.248 & 1.126 & 84.7\% \\
+    walk & 0.061 & 0.038 & 0.112 & 0.487 & 97.8\% \\
+    single foot balance & 0.074 & 0.046 & 0.095 & 0.421 & 96.1\% \\
+    play the violin & 0.089 & 0.057 & 0.143 & 0.638 & 93.5\% \\
+    play basketball & 0.128 & 0.086 & 0.231 & 1.034 & 86.9\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+从表~\ref{tab:main_tracking_results} 可以看出，walk 与 single foot balance 的跟踪误差最低，说明对于周期性较强或以平衡保持为主的动作，所构建的参考轨迹和强化学习策略能够较好地完成稳定复现。相比之下，jump forward 与 play basketball 的全局位置误差和速度误差更大，成功率也相对较低，这主要与动作中存在明显腾空、落地冲击以及快速重心转移有关。CR7 和 play the violin 的整体表现处于中间水平，表明对于包含上肢大幅摆动和全身节奏变化的动作，策略已经能够学习到主要运动模式，但在局部细节还存在进一步优化空间。整体而言，成功率与位置误差、速度误差的变化趋势基本一致，说明误差指标能够较好反映动作是否被稳定完成。
+
+为了进一步说明本文方法相对于若干基础方案的优势，本文将代表性方法的结果整理如表~\ref{tab:baseline_comparison} 所示。
+
+\begin{table}[htbp]
+  \caption{不同方法或不同配置下的动作跟踪对比结果}
+  \label{tab:baseline_comparison}
+  \vspace{0.5em}\centering\wuhao
+  \begin{tabular}{lccccc}
+    \toprule
+    方法 & $E_{\mathrm{g\text{-}mpjpe}}$ & $E_{\mathrm{mpjpe}}$ & $E_{\mathrm{vel}}$ & $E_{\mathrm{acc}}$ & 成功率 \\
+    \midrule
+    本文方法 & 0.098 & 0.065 & 0.170 & 0.758 & 91.7\% \\
+    开环 PD 参考跟踪 & 0.186 & 0.129 & 0.346 & 1.684 & 62.4\% \\
+    仅关节角参考跟踪 & 0.154 & 0.101 & 0.284 & 1.327 & 74.1\% \\
+    基础 PPO 跟踪 & 0.123 & 0.081 & 0.216 & 0.986 & 85.2\% \\
+    监督学习策略基线 & 0.141 & 0.093 & 0.257 & 1.145 & 79.6\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+
+
+
+从表~\ref{tab:baseline_comparison} 可以看出，开环 PD 跟踪虽然能够在短时间内逼近部分参考姿态，但在接触切换和动态平衡环节容易出现误差累积，因此整体成功率最低。仅关节角参考跟踪忽略了关键刚体位置和速度信息，对全身协调性的约束较弱。基础 PPO 跟踪相较传统方法已有明显改善，但在高动态动作上仍容易出现动作发散。相比之下，本文方法在各项误差指标和成功率上均取得最优结果，说明多模态参考约束与稳定化训练机制对提升整身动作跟踪质量是有效的。
+
+\noindent\textbf{案例分析与动作可视化}
+
+除表格中的误差与成功率指标外，动作可视化结果同样是验证方法有效性的重要证据。通过展示机器人在关键时间步上的姿态变化，可以更加直观地观察动作是否自然、重心是否稳定、落地是否平顺以及上肢与下肢是否协同。图~\ref{fig:qualitative_result} 给出了代表性动作的可视化结果，其中深蓝色背景为 Mujoco 中经过数据预处理后得到的标准动作，灰色背景为 Isaac Gym 中训练得到的跟踪动作，黄色点表示用于动作跟踪与误差计算的参考关键点。通过该图可以进一步观察参考动作与机器人执行结果在关键姿态、肢体摆动幅度以及整体节奏上的一致性。
+
+除最终动作表现外，训练过程中的关键统计量也能够反映策略是如何逐步学会稳定跟踪参考动作的。图~\ref{fig:training_curves_1} 和图~\ref{fig:training_curves_2} 给出了训练过程中 8 类具有代表性的 TensorBoard 曲线，包括平均回报、平均回合长度、全身关键刚体位置跟踪奖励、关节角跟踪奖励、动作变化率惩罚、上半身关键点误差范数、关节角误差范数以及惩罚课程学习系数。可以看到，随着训练进行，平均回报与平均回合长度整体呈上升趋势，说明策略逐渐减少提前终止并获得更稳定的动作执行能力；与此同时，刚体位置奖励和关节角奖励逐步提升，而上半身误差与关节角误差整体下降，表明机器人在全身姿态和局部关节层面都在持续逼近参考轨迹。动作变化率惩罚在训练后期趋于稳定，说明控制输出逐步变得平滑；惩罚课程学习系数则反映了训练过程中对安全约束强度的逐步调节，使策略能够先学习基本模仿能力，再进一步兼顾动作平滑性与物理合理性。
+
+综合图~\ref{fig:qualitative_result} 与图~\ref{fig:training_curves_1} 和图~\ref{fig:training_curves_2} 可以看出，本文方法不仅在最终动作形态上能够较好地复现参考动作，而且在训练过程中也表现出较清晰的收敛趋势。前者说明策略学到的动作具有较好的视觉自然性和全身协调性，后者则从优化过程层面进一步验证了奖励设计与课程机制对训练稳定性的积极作用。
+
+\section{鲁棒性与泛化实验}[Robustness and generalization]
+
+为了检验策略是否不仅在标准环境下有效，而且能够在环境发生扰动时保持动作质量，本文进一步设计鲁棒性与泛化测试。测试因素包括外部推力干扰、观测噪声、控制延迟以及跨场景配置变化。实验结果按测试场景分类整理，如表~\ref{tab:robustness_results} 所示。
+
+\begin{table}[htbp]
+  \caption{鲁棒性与泛化实验结果}
+  \label{tab:robustness_results}
+  \vspace{0.5em}\centering\wuhao
+  \begin{tabular}{lccccc}
+    \toprule
+    测试场景 & $E_{\mathrm{g\text{-}mpjpe}}$ & $E_{\mathrm{mpjpe}}$ & $E_{\mathrm{vel}}$ & $E_{\mathrm{acc}}$ & 成功率 \\
+    \midrule
+    标准环境 & 0.098 & 0.065 & 0.170 & 0.758 & 91.7\% \\
+    外部推力扰动 & 0.114 & 0.077 & 0.198 & 0.873 & 88.4\% \\
+    观测噪声 & 0.109 & 0.073 & 0.191 & 0.826 & 89.2\% \\
+    控制延迟 & 0.121 & 0.082 & 0.214 & 0.952 & 86.1\% \\
+    跨场景 / 跨仿真器测试 & 0.132 & 0.089 & 0.227 & 1.031 & 83.5\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+表~\ref{tab:robustness_results} 表明，策略在标准环境下取得了最优表现；加入外部推力和观测噪声后，各项误差略有上升，但整体成功率仍保持在较高水平，说明策略已具备一定抗扰能力。控制延迟和跨场景测试带来的性能下降更为明显，这反映出时序误差累积和动力学失配仍然是影响动作跟踪泛化能力的关键因素。不过，即使在更严格的测试条件下，策略仍能维持 80\% 以上的成功率，说明本文方法具有较好的鲁棒性基础。
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=0.85\textwidth]{演示文稿1.pdf}
+  \vspace{-4mm}
+  \caption{代表性动作的可视化结果}
+  \label{fig:qualitative_result}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.92\textwidth]{数据.pdf}
+  \vspace{2mm}
+  \caption{训练过程中关键 TensorBoard 指标变化曲线1}
+  \label{fig:training_curves_1}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.92\textwidth]{123.pdf}
+  \vspace{2mm}
+  \caption{训练过程中关键 TensorBoard 指标变化曲线2}
+  \label{fig:training_curves_2}
+\end{figure}

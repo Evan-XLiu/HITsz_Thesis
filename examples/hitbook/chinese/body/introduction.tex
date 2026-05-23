@@ -1,0 +1,324 @@
+% !Mode:: "TeX:UTF-8"
+
+\chapter{专家数据预处理与动作重定向}[Expert Data Preprocessing and Motion Retargeting]
+
+本章首先需要解决的核心问题是：如何将人体专家动作稳定、合理地转换为机器人可执行的参考轨迹。由于人体运动数据与人形机器人在骨架拓扑、连杆比例、关节自由度和物理约束上存在显著差异，若缺少系统的数据预处理和动作重定向步骤，后续强化学习很难获得高质量的参考目标。为此，本章围绕专家数据来源、SMPL 运动解析、关键点拓扑映射、基于仿真的数据清洗以及两阶段时序动作重定向方法展开，构建后续动作跟踪训练所需的参考动作库。
+
+\section{专家数据来源与处理目标}[Expert data and objective]
+
+专家数据质量直接决定后续强化学习动作跟踪任务的上限。本文以 AMASS 数据集中的人体运动捕捉序列作为主要专家动作来源\cite{amass2019}。
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\textwidth]{AMASS.png}
+  \caption{AMASS 数据集}
+  \label{fig:amass_dataset}
+\end{figure}
+
+AMASS 将多个来源的 MoCap 数据统一到 SMPL 参数化人体模型中，能够提供根节点平移、根节点旋转、人体关节姿态和体型参数等信息。对于来自普通视频的人体动作，也可以先利用三维人体重建方法恢复 SMPL 运动参数\cite{wang2025tram,loper2023smpl}，再接入本文后续的数据处理流程。因此，本章讨论的预处理方法并不依赖某一种原始采集设备，而是面向统一的 SMPL 运动表示。
+
+
+
+设一段人体专家动作序列表示为
+\begin{equation}
+\mathcal{D}_{\mathrm{H}}
+=
+\left\{
+\boldsymbol{p}^{\mathrm{h}}_t,
+\boldsymbol{R}^{\mathrm{h}}_t,
+\boldsymbol{\theta}^{\mathrm{h}}_t,
+\boldsymbol{\beta}^{\mathrm{h}},
+\Delta t
+\right\}_{t=1}^{T},
+\end{equation}
+其中，$\boldsymbol{p}^{\mathrm{h}}_t\in\mathbb{R}^{3}$ 为人体根节点在世界坐标系下的位置，$\boldsymbol{R}^{\mathrm{h}}_t\in SO(3)$ 为根节点朝向，$\boldsymbol{\theta}^{\mathrm{h}}_t$ 为 SMPL 关节姿态参数，$\boldsymbol{\beta}^{\mathrm{h}}$ 为体型参数，$\Delta t$ 为相邻帧的时间间隔，$T$ 为动作总帧数。本文数据处理的目标，是将上述人体运动序列转换为机器人可执行的参考轨迹
+\begin{equation}
+\mathcal{D}_{\mathrm{R}}
+=
+\left\{
+\boldsymbol{p}^{\mathrm{r}}_t,
+\boldsymbol{R}^{\mathrm{r}}_t,
+\boldsymbol{q}^{\mathrm{r}}_t,
+\dot{\boldsymbol{q}}^{\mathrm{r}}_t,
+\mathcal{X}^{\mathrm{r}}_t
+\right\}_{t=1}^{T},
+\end{equation}
+其中，$\boldsymbol{q}^{\mathrm{r}}_t$ 和 $\dot{\boldsymbol{q}}^{\mathrm{r}}_t$ 分别为机器人关节角与关节速度，$\mathcal{X}^{\mathrm{r}}_t$ 表示由正向运动学计算得到的机器人关键刚体状态。该轨迹不仅需要在几何形态上接近人体动作，还必须满足机器人关节限位、连杆尺寸、接触高度和时间连续性等约束，否则后续强化学习策略会在跟踪阶段遇到不可达目标。
+
+AMASS 数据集中包含多样化的人体体型和动作姿态，其动作数据示例如图~\ref{fig:amass_dataset} 所示。本文将专家数据预处理划分为五个环节：原始运动解析、关键点拓扑映射、基于仿真的数据清洗、两阶段动作重定向以及轨迹平滑与数据封装，整体流程如图~\ref{fig:chapter3_pipeline} 所示。
+
+
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\textwidth]{流程图.png}
+  \caption{专家数据预处理与动作重定向总体流程示意图}
+  \label{fig:chapter3_pipeline}
+\end{figure}
+
+\section{SMPL 运动解析与坐标规范化}[SMPL parsing and normalization]
+
+SMPL 模型通过体型参数和姿态参数生成具有固定拓扑的人体网格与骨架关键点。为了便于与机器人模型建立对应关系，本文不直接使用人体网格顶点，而是从 SMPL 运动中提取骨盆、膝、踝、肩、肘、腕等与机器人连杆具有明确语义对应的关键点。记第 $t$ 帧第 $i$ 个人体关键点为
+\begin{equation}
+\boldsymbol{x}^{\mathrm{h}}_{i,t}
+=
+F^{\mathrm{SMPL}}_i
+\left(
+\boldsymbol{p}^{\mathrm{h}}_t,
+\boldsymbol{R}^{\mathrm{h}}_t,
+\boldsymbol{\theta}^{\mathrm{h}}_t,
+\boldsymbol{\beta}^{\mathrm{h}}
+\right),
+\end{equation}
+其中 $F^{\mathrm{SMPL}}_i(\cdot)$ 表示 SMPL 正向运动学和蒙皮计算后得到的第 $i$ 个关键点位置。该表达式说明人体关键点并不是独立变量，而是由根位姿、关节姿态和体型共同决定。
+
+不同数据源中的世界坐标系定义可能并不一致。例如，部分动作数据以人体初始朝向作为前进方向，部分数据则保留采集设备的全局坐标。为减少这种差异对重定向结果的影响，本文首先将动作序列平移到以初始根节点为参考的局部坐标系中：
+\begin{equation}
+\bar{\boldsymbol{p}}^{\mathrm{h}}_t
+=
+\boldsymbol{p}^{\mathrm{h}}_t
+-
+\boldsymbol{p}^{\mathrm{h}}_1 .
+\end{equation}
+随后根据机器人默认站立方向，对根节点朝向进行水平旋转对齐，使人体前进方向与机器人模型的前向轴一致。该处理不会改变人体各关节的相对运动，只是统一后续优化问题的坐标基准。
+
+为了避免帧率差异造成参考轨迹与仿真控制频率不匹配，本文对人体序列进行时间重采样。设原始动作时间为 $t_k=k\Delta t$，目标控制周期为 $\Delta t_{\mathrm{ctrl}}$，则新时间索引 $\tau_m=m\Delta t_{\mathrm{ctrl}}$ 处的关节姿态和根位姿由相邻帧插值得到。平移量采用线性插值，旋转量采用球面线性插值，从而避免欧拉角插值带来的不连续问题。
+
+\section{运动学拓扑映射与体型拟合}[Kinematic mapping and shape fitting]
+
+动作重定向的第一步是建立人体模型与机器人模型之间的空间对应关系。由于人体骨架和机器人机构并不存在一一对应的关节定义，本文不采用逐关节角度复制，而是选取一组具有稳定语义的身体部位建立关键点集合\cite{he2024learning,zhang2024whole}。设 $\mathcal{I}$ 为匹配关键点下标集合，每个元素 $i\in\mathcal{I}$ 对应一对人体关键点和机器人连杆参考点。例如，人体骨盆对应机器人 pelvis 连杆，人体左膝对应机器人 left knee link，人体左踝对应机器人 left ankle link。
+
+\begin{figure}[htbp]
+  \centering
+  \vspace{4mm}
+  \includegraphics[width=0.65\textwidth]{人形机器人结构图.png}
+  \caption{本文所用人形机器人结构示意图}
+  \label{fig:humanoid_structure}
+\end{figure}
+
+本文所使用的人形机器人结构及主要关键部位如图~\ref{fig:humanoid_structure} 所示。在此基础上，SMPL 人体关键点与机器人连杆关键点之间的拓扑映射关系如图~\ref{fig:keypoint_mapping} 所示。
+
+\begin{figure}[htbp]
+  \centering
+  \vspace{4mm}
+  \includegraphics[width=0.90\textwidth]{fit_shape_.png}
+  \vspace{3mm}
+  \caption{SMPL关键点与机器人连杆关键点的拓扑映射示意图}
+  \vspace{2mm}
+  \label{fig:keypoint_mapping}
+\end{figure}
+
+由于 SMPL 默认人体体型与目标机器人连杆比例不同，若直接逐帧优化机器人关节，重定向结果容易出现上肢或下肢长度不匹配的问题。因此，本文先进行静态体型拟合，在初始站立姿态下求解一个更接近目标机器人几何比例的 SMPL 体型参数。设机器人在默认姿态下第 $i$ 个匹配关键点位置为 $\boldsymbol{x}^{\mathrm{r},0}_i$，SMPL 在体型参数 $\boldsymbol{\beta}$ 和全局缩放系数 $s$ 下的对应关键点位置为 $\boldsymbol{x}^{\mathrm{h},0}_i(\boldsymbol{\beta},s)$，则体型拟合损失定义为
+
+
+\begin{equation}
+\mathcal{L}_{\mathrm{shape}}
+=
+\frac{1}{|\mathcal{I}|}
+\sum_{i\in\mathcal{I}}
+w_i
+\left\|
+\boldsymbol{x}^{\mathrm{r},0}_i
+-
+\boldsymbol{x}^{\mathrm{h},0}_i(\boldsymbol{\beta},s)
+\right\|_2^2
++
+\lambda_{\beta}\left\|\boldsymbol{\beta}\right\|_2^2 .
+\label{eq:shape_loss}
+\end{equation}
+式中，$w_i$ 为第 $i$ 个关键点的权重，用于提高骨盆、膝、踝等影响全身支撑结构的关键点重要性；$\lambda_{\beta}$ 为体型正则化系数，用于抑制过大的体型参数偏移。第一项衡量机器人关键点与人体关键点之间的平均欧氏距离，第二项则约束优化后的 SMPL 体型仍处于合理人体形状范围内。
+
+优化式~\eqref{eq:shape_loss} 后得到的体型参数记为 $\boldsymbol{\beta}^{\ast}$。该参数不是最终机器人动作，而是为后续逐帧重定向提供几何一致的人体参考，使机器人和人体之间的肢体比例差异在进入动态序列优化前得到初步消除。
+
+\section{基于仿真的专家数据清洗}[Simulation-based data cleaning]
+
+原始人体动作或视频重建动作通常只保证运动学上的可见姿态合理，并不一定满足机器人控制所需的物理可行性。高动态动作中常见的问题包括足端穿地、根节点高度突变、膝踝姿态异常、相邻帧速度过大以及由于重建噪声导致的短时抖动。若将这些片段直接作为强化学习参考轨迹，策略可能会学习到不可实现的目标，甚至通过异常姿态获得局部奖励。
+
+参考物理角色动作跟踪中的数据验证思路\cite{tessler2024maskedmimic,he2024learning}，本文在重定向前后均设置数据清洗步骤。首先在运动学层面剔除明显异常帧，判断条件包括根节点高度范围、关键点速度上界和关节角连续性。以关键点速度为例，若
+\begin{equation}
+\max_{i\in\mathcal{I}}
+\frac{
+\left\|
+\boldsymbol{x}^{\mathrm{h}}_{i,t}
+-
+\boldsymbol{x}^{\mathrm{h}}_{i,t-1}
+\right\|_2
+}{\Delta t}
+>
+v_{\max},
+\end{equation}
+则说明该帧附近可能存在重建跳变，需要进行平滑、插值修复或从动作库中剔除。
+
+其次，本文利用仿真环境对重定向候选轨迹进行可跟踪性验证\cite{tessler2024maskedmimic,he2024learning}。设策略或跟踪器在仿真中执行候选参考动作后得到的机器人刚体状态为 $\hat{\mathcal{X}}^{\mathrm{r}}_t$，候选参考刚体状态为 $\mathcal{X}^{\mathrm{r}}_t$，则整段动作的平均跟踪误差可写为
+\begin{equation}
+E_{\mathrm{track}}
+=
+\frac{1}{T|\mathcal{B}|}
+\sum_{t=1}^{T}
+\sum_{j\in\mathcal{B}}
+\left\|
+\hat{\boldsymbol{x}}^{\mathrm{r}}_{j,t}
+-
+\boldsymbol{x}^{\mathrm{r}}_{j,t}
+\right\|_2 ,
+\end{equation}
+其中 $\mathcal{B}$ 为用于评估的机器人刚体集合，$\hat{\boldsymbol{x}}^{\mathrm{r}}_{j,t}$ 和 $\boldsymbol{x}^{\mathrm{r}}_{j,t}$ 分别表示仿真执行状态和参考状态中的第 $j$ 个刚体位置。当 $E_{\mathrm{track}}$ 超过给定阈值，或者动作执行过程中发生明显失稳、穿模和异常接触时，该动作片段不进入最终专家动作库。经过该步骤后保留下来的数据记为 $\mathcal{D}_{\mathrm{H}}^{\mathrm{clean}}$。
+
+\section{两阶段时序动作重定向}[Two-stage temporal retargeting]
+
+完成体型拟合和数据清洗后，需要将完整人体动作序列转换为机器人关节空间轨迹。本文采用“根位姿对齐”和“关节姿态优化”相结合的两阶段方式\cite{he2024learning}。第一阶段处理全局位移和朝向，使机器人根节点运动与人体运动的整体趋势一致；第二阶段在每一帧内优化机器人关节角，使关键连杆尽可能贴合人体关键点。
+
+对于第 $t$ 帧，机器人正向运动学可表示为
+\begin{equation}
+\boldsymbol{x}^{\mathrm{r}}_{i,t}
+=
+F^{\mathrm{R}}_i
+\left(
+\boldsymbol{p}^{\mathrm{r}}_t,
+\boldsymbol{R}^{\mathrm{r}}_t,
+\boldsymbol{q}^{\mathrm{r}}_t
+\right),
+\end{equation}
+其中 $F^{\mathrm{R}}_i(\cdot)$ 为机器人第 $i$ 个匹配连杆参考点的正向运动学函数，$\boldsymbol{p}^{\mathrm{r}}_t$ 为机器人根节点位置，$\boldsymbol{R}^{\mathrm{r}}_t$ 为根节点旋转，$\boldsymbol{q}^{\mathrm{r}}_t$ 为机器人关节角。
+
+逐帧重定向的核心目标是最小化机器人关键点与清洗后人体关键点之间的空间误差：
+\begin{equation}
+\mathcal{L}_{\mathrm{kp}}
+=
+\frac{1}{|\mathcal{I}|}
+\sum_{i\in\mathcal{I}}
+w_i
+\left\|
+F^{\mathrm{R}}_i
+\left(
+\boldsymbol{p}^{\mathrm{r}}_t,
+\boldsymbol{R}^{\mathrm{r}}_t,
+\boldsymbol{q}^{\mathrm{r}}_t
+\right)
+-
+\boldsymbol{x}^{\mathrm{h}}_{i,t}
+\right\|_2^2 .
+\end{equation}
+该项约束机器人在空间中的身体形态接近人体参考动作。由于机器人和人体自由度不同，该误差通常无法降为零，因此重定向追求的是关键部位运动趋势一致，而不是完全复制人体骨骼姿态。
+
+仅依赖关键点距离会导致相邻帧之间出现抖动，因此本文加入时间平滑项：
+\begin{equation}
+\mathcal{L}_{\mathrm{smooth}}
+=
+\left\|
+\boldsymbol{q}^{\mathrm{r}}_t
+-
+\boldsymbol{q}^{\mathrm{r}}_{t-1}
+\right\|_2^2
++
+\eta
+\left\|
+\left(\boldsymbol{q}^{\mathrm{r}}_t-\boldsymbol{q}^{\mathrm{r}}_{t-1}\right)
+-
+\left(\boldsymbol{q}^{\mathrm{r}}_{t-1}-\boldsymbol{q}^{\mathrm{r}}_{t-2}\right)
+\right\|_2^2 .
+\end{equation}
+第一项限制关节角的一阶变化幅度，第二项限制关节角加速度形式的二阶变化，$\eta$ 为二阶平滑权重。该设计可以减少高频噪声，并使后续 PD 控制器更容易跟踪参考轨迹。
+
+同时，为避免优化结果过度接近关节极限，本文引入关节限位惩罚项：
+\begin{equation}
+\mathcal{L}_{\mathrm{limit}}
+=
+\sum_{d=1}^{n_q}
+\left[
+\max\left(0,q^{\mathrm{r}}_{t,d}-q_{d}^{\max}\right)^2
++
+\max\left(0,q_{d}^{\min}-q^{\mathrm{r}}_{t,d}\right)^2
+\right],
+\end{equation}
+其中 $n_q$ 为机器人可控关节数，$q_{d}^{\min}$ 和 $q_{d}^{\max}$ 分别为第 $d$ 个关节的机械下限和上限。该项在关节位于合法范围内时为零，只有当优化结果越界时才产生惩罚。
+
+综合上述约束，第 $t$ 帧的重定向优化问题写为
+\begin{equation}
+\min_{\boldsymbol{p}^{\mathrm{r}}_t,\boldsymbol{R}^{\mathrm{r}}_t,\boldsymbol{q}^{\mathrm{r}}_t}
+\quad
+\mathcal{L}_{\mathrm{retarget}}
+=
+\mathcal{L}_{\mathrm{kp}}
++
+\lambda_s\mathcal{L}_{\mathrm{smooth}}
++
+\lambda_l\mathcal{L}_{\mathrm{limit}},
+\label{eq:retarget_loss}
+\end{equation}
+其中 $\lambda_s$ 和 $\lambda_l$ 分别控制时间平滑和关节限位约束的权重。式~\eqref{eq:retarget_loss} 中的三类误差具有不同作用：关键点误差保证动作语义，平滑误差保证轨迹连续，限位误差保证机器人结构可达。
+
+在实现中，本文采用分组优化策略：根节点平移和旋转属于低维全局变量，主要影响机器人整体位置；关节角属于高维局部变量，主要影响肢体姿态。将两类变量分别设置学习率并交替更新，可以降低根位姿误差和肢体姿态误差之间的相互干扰。每轮更新后，还依据统一机器人描述格式（Unified Robot Description Format, URDF）或 MuJoCo XML 格式（MuJoCo XML Format, MJCF）中的关节范围执行截断：
+\begin{equation}
+\boldsymbol{q}^{\mathrm{r}}_t
+\leftarrow
+\mathrm{clip}
+\left(
+\boldsymbol{q}^{\mathrm{r}}_t,
+\boldsymbol{q}_{\min},
+\boldsymbol{q}_{\max}
+\right).
+\end{equation}
+该操作相当于将优化结果投影回机器人可行关节空间，能够减少穿模、自碰撞和非物理构型。
+
+\section{轨迹平滑、接触修正与数据封装}[Smoothing, contact correction and packaging]
+
+\begin{figure}[htbp]
+  \centering
+  \vspace{3mm}
+  \includegraphics[width=0.95\textwidth]{amass_npz.png}
+  \vspace{2mm}
+  \caption{专家轨迹封装调用方式示意图}
+  \label{fig:motion_packaging}
+\end{figure}
+
+逐帧优化后的机器人轨迹仍可能包含小幅抖动。为了增强时间连续性，本文对关节角、根节点平移和根节点旋转进行后处理。对关节角序列，采用一维高斯滤波：
+
+
+\begin{equation}
+\tilde{\boldsymbol{q}}^{\mathrm{r}}_t
+=
+\sum_{k=-K}^{K}
+G_{\sigma}(k)
+\boldsymbol{q}^{\mathrm{r}}_{t-k},
+\quad
+G_{\sigma}(k)
+=
+\frac{
+\exp\left(-\frac{k^2}{2\sigma^2}\right)
+}{
+\sum_{m=-K}^{K}
+\exp\left(-\frac{m^2}{2\sigma^2}\right)
+}.
+\end{equation}
+其中 $G_{\sigma}(k)$ 为归一化高斯核，$\sigma$ 控制平滑强度，$K$ 为滤波窗口半径。归一化分母保证所有权重之和为 $1$，因此滤波后不会系统性改变关节角均值。根节点平移采用同样的滤波形式，根节点旋转则先转换为连续旋转表示或四元数，再进行插值和平滑，避免旋转角度跳变。
+
+由于人体数据缺少真实接触力信息，重定向轨迹可能出现足端略微离地或插入地面的情况。本文根据机器人足端关键点高度进行整体高度修正。设 $\mathcal{F}$ 为足端关键点集合，重定向后第 $t$ 帧足端最低高度为
+\begin{equation}
+h_t
+=
+\min_{j\in\mathcal{F}}
+z^{\mathrm{r}}_{j,t},
+\end{equation}
+其中 $z^{\mathrm{r}}_{j,t}$ 表示第 $j$ 个足端关键点的竖直坐标。若地面高度设为 $0$，则可将根节点高度修正为
+\begin{equation}
+\tilde{\boldsymbol{p}}^{\mathrm{r}}_t
+=
+\boldsymbol{p}^{\mathrm{r}}_t
+-
+\left[0,0,h_t-h_{\mathrm{margin}}\right]^{\mathrm{T}},
+\end{equation}
+其中 $h_{\mathrm{margin}}$ 为预留的足底高度裕量。该修正使轨迹整体与地面保持合理接触关系，降低强化学习环境初始化时的异常碰撞风险。
+
+最终，本文将处理后的数据封装为统一的动作文件，主要字段包括根节点平移 $\tilde{\boldsymbol{p}}^{\mathrm{r}}_t$、根节点旋转 $\tilde{\boldsymbol{R}}^{\mathrm{r}}_t$、关节角 $\tilde{\boldsymbol{q}}^{\mathrm{r}}_t$、关节速度 $\dot{\boldsymbol{q}}^{\mathrm{r}}_t$、刚体关键点状态 $\mathcal{X}^{\mathrm{r}}_t$、帧率和动作元数据。在强化学习训练阶段，动作库模块根据当前相位 $\phi\in[0,1]$ 查询或插值得到参考状态。若动作长度为 $T$ 帧，则相位与帧索引的对应关系可写为
+\begin{equation}
+u(\phi)=1+\phi(T-1).
+\end{equation}
+当 $u(\phi)$ 不是整数时，平移和关节角采用相邻帧线性插值，旋转采用球面线性插值。这样可以在仿真控制频率与数据原始帧率不一致时，仍然获得连续的参考状态。
+
+
+
+
+\section{本章小结}[Summary]
+
+本章围绕专家数据预处理与动作重定向展开说明。首先，本章将 AMASS 或视频重建得到的人体动作统一表示为 SMPL 运动序列，并进行坐标规范化和时间重采样；其次，通过人体关键点与机器人连杆关键点之间的拓扑映射，建立跨结构动作转换关系；随后，利用体型拟合、仿真清洗、关键点误差优化、时间平滑和关节限位约束，将人体专家动作转换为机器人可执行参考轨迹；最后，将轨迹封装为强化学习环境可直接调用的动作库文件。经过上述处理，原始人体动作从仅具备运动学意义的数据，转化为兼顾机器人结构可达性和物理跟踪可行性的专家参考，为后续的强化学习运动跟踪方法提供基础。

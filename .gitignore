@@ -1,0 +1,36 @@
+# macOS metadata
+.DS_Store
+._*
+
+# Local environment mounts
+.codex
+
+# LaTeX intermediate files
+*.acn
+*.acr
+*.alg
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.brf
+*.fdb_latexmk
+*.fls
+*.glg
+*.glo
+*.gls
+*.idx
+*.ilg
+*.ind
+*.log
+*.lof
+*.lot
+*.out
+*.run.xml
+*.synctex.gz
+*.thm
+*.toe
+*.toc
+
+# Project-specific generated glossary style
+examples/hitbook/chinese/thesis.ist

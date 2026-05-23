@@ -1,0 +1,394 @@
+% !Mode:: "TeX:UTF-8"
+
+\chapter{基于强化学习的运动跟踪方法}[Reinforcement Learning Based Motion Tracking]
+
+在获得机器人可执行的参考动作轨迹之后，下一步需要解决的问题是如何在物理仿真环境中学习稳定、自然且具备一定鲁棒性的整身动作跟踪策略。与单纯的运动学模仿不同，强化学习动作跟踪需要同时考虑接触切换、执行器约束、整体平衡和长时序控制误差累积等因素，因此必须对任务建模、观测表示、动作输出、奖励函数和训练机制进行系统设计。基于这一目标，本章将围绕整身动作跟踪任务架构、相位建模、非对称 Actor-Critic、PPO 优化目标以及稳定化训练策略展开详细说明。
+
+\section{任务建模、观测空间与相位建模}[Task modeling, observation and phase modeling]
+
+在完成专家数据预处理后，本文基于 HumanoidVerse 风格的并行强化学习框架构建整身动作跟踪任务。该任务以第 3 章生成的机器人参考轨迹为目标输入，在 Isaac Gym 物理仿真环境中通过大量并行环境采样，实现从机器人当前状态到关节控制指令的闭环映射。整体方法可概括为“参考轨迹查询 - 状态编码 - 策略输出 - 低层控制 - 奖励反馈”五个环节。
+
+在每一个控制周期内，动作库模块根据当前动作编号和相位变量查询参考状态；环境模块将机器人本体感知信息与参考动作时序信息组合为观测向量；策略网络输出连续动作；底层 PD 控制器将该动作转换为关节驱动力矩；仿真器进一步完成动力学积分，并根据机器人状态与参考状态之间的误差计算奖励信号，最终用于更新策略参数。该流程与 DeepMimic 中“以参考动作约束物理仿真探索”的思想一致\cite{deepmimic2018}，但针对人形机器人高自由度、多接触和长时序动作跟踪问题做了更适合机器人控制的任务建模。
+
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\textwidth]{4.png}
+  \caption{基于强化学习的整身动作跟踪总体框架}
+  \label{fig:rl_tracking_framework}
+\end{figure}
+
+本文没有采用直接最小化专家动作与策略动作差异的行为克隆方法，而是采用基于强化学习的模仿学习范式。原因在于，人形机器人动作执行过程受到接触切换、执行器响应、关节限位和整体平衡约束的共同影响，仅凭监督学习很难保证动作在物理环境中的可行性。强化学习通过最大化长期累计回报，使策略在跟踪参考动作的同时主动适应动力学约束，从而获得更高的运动稳定性和动作自然度。
+
+为了使策略既能感知机器人自身动态状态，又能识别当前所处的参考动作阶段，本文将观测表示为相位条件状态：
+\begin{equation}
+s_t=
+\left[
+s_t^{\mathrm{p}},\phi_t
+\right],
+\label{eq:state_full}
+\end{equation}
+其中 $s_t^{\mathrm{p}}$ 表示机器人本体感知状态，$\phi_t\in[0,1]$ 表示归一化动作相位。该设计继承了相位驱动动作模仿的基本思想\cite{deepmimic2018}，使得单个策略能够沿参考动作时间轴学习不同阶段的控制模式。
+
+对于本体感知状态，本文采用短历史堆叠形式增强策略对速度和动态趋势的辨识能力。设机器人有 $n_q$ 个可控关节，$q_t\in\mathbb{R}^{n_q}$ 和 $\dot{q}_t\in\mathbb{R}^{n_q}$ 分别表示当前关节角与关节角速度，$\omega_t^{\mathrm{root}}\in\mathbb{R}^{3}$ 表示根节点角速度，$g_t^{\mathrm{root}}\in\mathbb{R}^{3}$ 表示投影到根节点坐标系下的重力方向，$a_{t-1}\in\mathbb{R}^{n_q}$ 表示上一步策略输出动作，则本体感知状态写为
+\begin{equation}
+s_t^{\mathrm{p}}
+\triangleq
+\left[
+q_{t-h+1:t},
+\dot{q}_{t-h+1:t},
+\omega_{t-h+1:t}^{\mathrm{root}},
+g_{t-h+1:t}^{\mathrm{root}},
+a_{t-1}
+\right],
+\label{eq:prop_state}
+\end{equation}
+其中 $h$ 为历史步长。使用短时历史而不是单帧状态，有助于策略在不显式构建系统模型的情况下隐式估计关节运动趋势和姿态变化。
+
+相位变量用于描述当前时刻在参考动作中的归一化位置。设当前参考动作总时长为 $T_{\mathrm{motion}}$，动作起始时刻为 $t_{\mathrm{start}}$，则相位定义为
+\begin{equation}
+\phi_t
+=
+\frac{t-t_{\mathrm{start}}}{T_{\mathrm{motion}}}.
+\label{eq:phase_var}
+\end{equation}
+当 $\phi_t=0$ 时表示动作刚开始，$\phi_t=1$ 时表示动作结束。对于周期性动作，还可采用取模方式将相位约束在一个周期内。该变量能够帮助策略区分同一动作中“起跳、腾空、落地”或“下蹲、发力、恢复”等不同阶段。
+
+动作空间采用连续关节目标表示。设策略输出为
+\begin{equation}
+a_t=\pi_{\theta}(s_t)\in\mathbb{R}^{n_q},
+\end{equation}
+则该动作经过缩放或偏置映射后生成关节目标位置 $q_t^{\ast}$。在工程实现中，可写为
+\begin{equation}
+q_t^{\ast}
+=
+q^{\mathrm{ref}}_t+\alpha\odot a_t,
+\label{eq:action_to_target}
+\end{equation}
+其中 $q^{\mathrm{ref}}_t$ 为参考关节角，$\alpha$ 为动作缩放系数，$\odot$ 表示逐元素乘法。该形式表明策略不必从零开始生成完整关节目标，而是在参考动作附近学习更适合当前动力学环境的控制修正量。
+
+\section{策略结构与仿真闭环}[Policy architecture and simulator loop]
+
+人形机器人动作跟踪本质上可以建模为部分可观测马尔可夫决策过程。虽然仿真环境可以直接访问全局刚体位置、参考轨迹未来片段和根节点线速度等信息，但这些量在真实部署或统一控制接口下通常不容易直接获得。因此，本文采用非对称 Actor-Critic 训练框架：Actor 仅依赖本体感知和相位变量，Critic 在训练过程中额外访问更丰富的特权信息，以提升价值估计质量。
+
+Actor 输入定义为
+\begin{equation}
+s_t^{\mathrm{A}}=
+\left[s_t^{\mathrm{p}},\phi_t\right],
+\end{equation}
+Critic 输入定义为
+\begin{equation}
+s_t^{\mathrm{C}}=
+\left[
+s_t^{\mathrm{A}},
+\hat{x}^{\mathrm{ref}}_t,
+\hat{v}^{\mathrm{ref}}_t,
+\hat{x}^{\mathrm{sim}}_t
+\right],
+\label{eq:critic_state}
+\end{equation}
+其中 $\hat{x}^{\mathrm{ref}}_t$ 表示参考动作的关键刚体位置特征，$\hat{v}^{\mathrm{ref}}_t$ 表示参考根速度或刚体速度特征，$\hat{x}^{\mathrm{sim}}_t$ 表示仿真环境中额外可获得的辅助状态。该设计的作用在于：Actor 侧保留未来可部署的紧凑输入形式，而 Critic 侧借助特权状态提供更稳定的优势估计和价值学习。
+
+设 Actor 参数为 $\theta$，Critic 参数为 $\psi$，则策略分布和价值函数分别写为
+\begin{equation}
+\pi_{\theta}(a_t|s_t^{\mathrm{A}}),\qquad
+V_{\psi}(s_t^{\mathrm{C}}).
+\end{equation}
+在训练时，Critic 利用更完整的环境状态拟合回报，而 Actor 只根据自身可观测输入更新参数。该结构在动作跟踪任务中能够显著缓解仅用局部状态时的学习不稳定问题，也为后续 sim-to-sim 或 sim-to-real 迁移保留更一致的输入接口。
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\textwidth]{AC.png}
+  \caption{非对称 Actor-Critic 训练结构示意图}
+  \label{fig:asymmetric_ac}
+\end{figure}
+
+策略网络输出的连续动作并不直接作为电机力矩施加到机器人关节上，而是通过低层 PD 控制器转换为物理上更平滑的关节驱动信号。设当前关节状态为 $(q_t,\dot{q}_t)$，目标关节状态为 $(q_t^{\ast},\dot{q}_t^{\ast})$，则第 $t$ 步控制力矩写为
+\begin{equation}
+\tau_t
+=
+K_p\left(q_t^{\ast}-q_t\right)
++
+K_d\left(\dot{q}_t^{\ast}-\dot{q}_t\right),
+\label{eq:pd_control}
+\end{equation}
+其中 $K_p$ 和 $K_d$ 分别为比例增益和微分增益矩阵。通常情况下，$\dot{q}_t^{\ast}$ 可设为参考关节速度或零向量。
+
+将 PD 控制器、机器人动力学与接触模型统一记为环境转移函数 $f^{\mathrm{sim}}$，则闭环系统动态可写为
+\begin{equation}
+s_{t+1}
+=
+f^{\mathrm{sim}}
+\left(
+s_t,
+\tau_t,
+\xi_t
+\right),
+\end{equation}
+其中 $\xi_t$ 表示地面摩擦、质量扰动、传感器噪声和接触求解误差等环境因素。该表达式说明强化学习任务并不是直接学习解析动力学，而是在仿真环境隐式定义的状态转移过程中学习长期最优控制策略。
+
+与直接输出力矩相比，基于位置目标和 PD 控制的方式更适合利用参考轨迹中的运动学先验。策略只需要学习在参考轨迹基础上的控制偏置，而不必同时学习关节期望位置和电机响应规律，因而通常更易训练，也更符合现有人形机器人控制接口的工程实现方式。
+
+\section{优化目标与奖励设计}[Optimization objective and reward design]
+
+设策略网络为 $\pi_\theta(a_t|s_t^{\mathrm{A}})$，其中 $\theta$ 为网络参数，则整身动作跟踪任务的优化目标是最大化折扣累计回报：
+\begin{equation}
+J(\theta)
+=
+\mathbb{E}_{\tau\sim\pi_\theta}
+\left[
+\sum_{t=0}^{T}
+\gamma^t r_t
+\right],
+\end{equation}
+其中 $\tau=(s_0,a_0,s_1,a_1,\ldots)$ 为策略采样得到的轨迹，$\gamma$ 为折扣因子，$r_t$ 为由模仿奖励和正则项共同构成的即时回报。
+
+本文采用近端策略优化算法（PPO）更新策略参数\cite{ppo2017}。设
+\begin{equation}
+\rho_t(\theta)
+=
+\frac{\pi_\theta(a_t|s_t^{\mathrm{A}})}
+{\pi_{\theta_{\mathrm{old}}}(a_t|s_t^{\mathrm{A}})}
+\end{equation}
+为新旧策略概率比，$\hat{A}_t$ 为优势函数估计，则 PPO 的截断替代目标为
+\begin{equation}
+\mathcal{L}^{\mathrm{clip}}(\theta)
+=
+\mathbb{E}_t
+\left[
+\min
+\left(
+\rho_t(\theta)\hat{A}_t,
+\mathrm{clip}(\rho_t(\theta),1-\epsilon,1+\epsilon)\hat{A}_t
+\right)
+\right].
+\end{equation}
+
+再综合价值函数误差项和策略熵正则项，训练目标可写为
+\begin{equation}
+\mathcal{L}_{\mathrm{PPO}}(\theta,\psi)
+=
+\mathbb{E}_t
+\left[
+\mathcal{L}^{\mathrm{clip}}(\theta)
+-c_v\left(V_\psi(s_t^{\mathrm{C}})-\hat{R}_t\right)^2
++c_e\mathcal{H}(\pi_\theta(\cdot|s_t^{\mathrm{A}}))
+\right],
+\label{eq:ppo_full}
+\end{equation}
+其中 $V_\psi$ 为价值网络输出，$\hat{R}_t$ 为回报估计，$\mathcal{H}$ 表示策略熵，$c_v$ 和 $c_e$ 分别为价值损失权重和熵正则权重。熵项能够抑制训练早期过快收缩到单一动作模式，从而提升探索能力。
+
+\subsection{参考状态表示与误差度量}[Reference state and error metrics]
+
+在动作跟踪任务中，奖励和评价都需要建立在机器人当前状态与参考轨迹状态之间的误差度量上。设第 $i$ 个刚体在仿真状态与参考状态中的空间位置分别为 $x_i^{\mathrm{sim}}(t)$ 和 $x_i^{\mathrm{ref}}(t)$，则其位置误差为
+\begin{equation}
+\Delta x_i(t)
+=
+x_i^{\mathrm{sim}}(t)-x_i^{\mathrm{ref}}(t).
+\end{equation}
+
+刚体姿态采用四元数表示，其相对姿态误差写为
+\begin{equation}
+q_i^{\mathrm{err}}(t)
+=
+q_i^{\mathrm{sim}}(t)\otimes
+\left(q_i^{\mathrm{ref}}(t)\right)^{-1},
+\end{equation}
+其中 $\otimes$ 表示四元数乘法。线速度和角速度误差分别定义为
+\begin{equation}
+\Delta v_i(t)=v_i^{\mathrm{sim}}(t)-v_i^{\mathrm{ref}}(t),
+\quad
+\Delta \omega_i(t)=\omega_i^{\mathrm{sim}}(t)-\omega_i^{\mathrm{ref}}(t).
+\end{equation}
+
+在关节空间中，关节角和关节角速度误差表示为
+\begin{equation}
+\Delta q(t)=q^{\mathrm{sim}}(t)-q^{\mathrm{ref}}(t),
+\quad
+\Delta \dot{q}(t)=\dot{q}^{\mathrm{sim}}(t)-\dot{q}^{\mathrm{ref}}(t).
+\end{equation}
+
+为了减少全局平移和航向角对跟踪误差的直接干扰，位置类误差在送入策略或奖励前通常会转换到根节点局部坐标系中。设 $R_{\mathrm{heading}}(q_{\mathrm{root}}^{\mathrm{ref}}(t))$ 表示由参考根姿态提取出的偏航旋转矩阵，则局部位置误差为
+\begin{equation}
+\Delta \hat{x}_i(t)
+=
+R_{\mathrm{heading}}^{-1}
+\left(q_{\mathrm{root}}^{\mathrm{ref}}(t)\right)
+\Delta x_i(t).
+\end{equation}
+该操作能够让策略更关注身体各部位之间的相对构型，而不是仅通过记忆全局轨迹来完成控制。
+
+\subsection{奖励函数设计}[Reward design]
+
+本文的奖励函数围绕参考动作与机器人当前状态之间的多模态误差构建。在具体实现中，奖励由动作跟踪奖励、正则化惩罚项和终止惩罚三部分组成，其总体形式可写为
+\begin{equation}
+r_t
+=
+\sum_{k\in\mathcal{M}} w_k r_k^{\mathrm{track}}(t)
++
+\lambda_p
+\sum_{j\in\mathcal{R}} w_j r_j^{\mathrm{pen}}(t)
++
+w_{\mathrm{term}} r_{\mathrm{term}}(t),
+\label{eq:reward_total}
+\end{equation}
+其中 $\mathcal{M}$ 为动作跟踪奖励集合，$\mathcal{R}$ 为惩罚项集合，$w_k$、$w_j$ 和 $w_{\mathrm{term}}$ 为对应权重，$\lambda_p$ 为惩罚项课程学习系数。本文实际训练中，$\lambda_p$ 用于调节力矩、动作变化率、关节约束、足部姿态和足端滑移等惩罚项的影响强度，使策略在训练早期能够优先学会基本跟踪能力，在训练后期再逐步强化物理可实现性与动作质量约束。
+
+在动作跟踪部分，本文并非只对单一姿态误差进行奖励，而是同时约束全身关键刚体位置、遥操作三点位置、双脚位置、全身刚体旋转、刚体线速度、刚体角速度、关节角以及关节速度等多种信息。对这些跟踪项，本文统一采用指数核形式将误差映射到 $(0,1]$ 范围内。以全身刚体位置奖励为例，考虑到上半身和下半身对动作自然性的贡献不同，本文分别计算其位置误差并进行加权：
+\begin{equation}
+r_{\mathrm{body\_pos}}(t)
+=
+\alpha_{\mathrm{low}}
+\exp\left(
+-\frac{\mathbb{E}_{i\in\mathcal{B}_{\mathrm{low}}}\left[\|\Delta x_i(t)\|_2^2\right]}{\sigma_{\mathrm{low}}}
+\right)
++
+\alpha_{\mathrm{up}}
+\exp\left(
+-\frac{\mathbb{E}_{i\in\mathcal{B}_{\mathrm{up}}}\left[\|\Delta x_i(t)\|_2^2\right]}{\sigma_{\mathrm{up}}}
+\right),
+\end{equation}
+\begin{equation}
+r_{\mathrm{vr3}}(t)
+=
+\exp\left(
+-\frac{\mathbb{E}_{i\in\mathcal{V}}\left[\|\Delta x_i(t)\|_2^2\right]}{\sigma_{\mathrm{vr3}}}
+\right),
+\end{equation}
+\begin{equation}
+r_{\mathrm{feet}}(t)
+=
+\exp\left(
+-\frac{\mathbb{E}_{i\in\mathcal{F}}\left[\|\Delta x_i(t)\|_2^2\right]}{\sigma_{\mathrm{feet}}}
+\right),
+\end{equation}
+\begin{equation}
+r_{\mathrm{body\_rot}}(t)
+=
+\exp\left(
+-\frac{\mathbb{E}_i\left[\|\Delta \theta_i(t)\|_2^2\right]}{\sigma_{\mathrm{rot}}}
+\right),
+\end{equation}
+\begin{equation}
+r_{\mathrm{body\_vel}}(t)
+=
+\exp\left(
+-\frac{\mathbb{E}_i\left[\|\Delta v_i(t)\|_2^2\right]}{\sigma_{\mathrm{vel}}}
+\right),
+\end{equation}
+\begin{equation}
+r_{\mathrm{body\_angvel}}(t)
+=
+\exp\left(
+-\frac{\mathbb{E}_i\left[\|\Delta \omega_i(t)\|_2^2\right]}{\sigma_{\mathrm{angvel}}}
+\right),
+\end{equation}
+\begin{equation}
+r_{\mathrm{joint\_pos}}(t)
+=
+\exp\left(
+-\frac{\mathbb{E}_{m}\left[(\Delta q_m(t))^2\right]}{\sigma_{\mathrm{joint\_pos}}}
+\right),
+\end{equation}
+\begin{equation}
+r_{\mathrm{joint\_vel}}(t)
+=
+\exp\left(
+-\frac{\mathbb{E}_{m}\left[(\Delta \dot{q}_m(t))^2\right]}{\sigma_{\mathrm{joint\_vel}}}
+\right).
+\end{equation}
+
+上述奖励项分别对应“上半身与下半身关键点位置对齐”“遥操作关键观测点对齐”“双脚落点对齐”“全身姿态一致”“全身速度一致”“关节姿态接近参考”和“关节速度变化规律接近参考”等目标。指数核的优点在于：误差较小时奖励变化细腻，有利于后期精调；误差较大时奖励迅速衰减，有助于将策略搜索限制在参考动作附近，从而提升训练稳定性。
+
+除跟踪奖励外，本文还加入控制平滑性与物理约束相关的惩罚项，以抑制不合理控制策略。对动作变化率和关节力矩，可分别定义
+\begin{equation}
+r_{\mathrm{action\_smooth}}(t)
+=
+-\|a_t-a_{t-1}\|_2^2,
+\end{equation}
+对关节力矩幅值可定义
+\begin{equation}
+r_{\mathrm{torque}}(t)
+=
+-\|\tau_t\|_2^2,
+\end{equation}
+此外，本文实际训练中还显式加入了关节位置越界惩罚、关节速度越界惩罚、力矩接近饱和惩罚、足部姿态惩罚、双脚朝向偏差惩罚以及接触状态下的足端滑移惩罚。上述惩罚项共同约束策略在完成动作模仿的同时保持平滑、节能并满足基本接触物理规律。进一步地，当机器人在训练过程中偏离参考动作过大并触发回合终止时，还会施加额外的终止惩罚，用于抑制明显失稳或动作崩坏的行为。
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\textwidth]{奖励函数设计.png}
+  \caption{动作跟踪任务奖励函数组成示意图}
+  \label{fig:reward_components}
+\end{figure}
+
+\section{稳定化机制与数据回收}[Stabilization and data reuse]
+
+高动态动作训练往往容易在早期发生频繁摔倒或陷入局部最优。为此，本文在任务设计中引入终止课程学习、参考状态初始化和域随机化三类稳定化机制，这些设计参考了物理角色动作模仿和机器人学习控制中的常见经验\cite{deepmimic2018,tobin2017domain,tan2018sim}。
+
+\subsection{终止课程学习}[Termination curriculum]
+
+当机器人偏离参考动作过大时，继续滚动当前轨迹通常只会产生低质量样本。为此，本文设置动作偏离终止条件：若机器人关键点平均误差超过阈值 $\tau_k$，则提前结束当前回合并重置环境，
+\begin{equation}
+\frac{1}{|\mathcal{B}|}
+\sum_{i\in\mathcal{B}}
+\|\Delta x_i(t)\|_2
+>
+\tau_k
+\Rightarrow
+\mathrm{reset},
+\label{eq:termination_cond}
+\end{equation}
+其中 $\mathcal{B}$ 为关键刚体集合，$\tau_k$ 为第 $k$ 个训练阶段对应的误差阈值。
+
+训练初期，阈值设置得较宽，允许策略在较大误差范围内探索；随着训练推进，再逐步收紧阈值。其课程调度形式可写为
+\begin{equation}
+\tau_k
+=
+\tau_{\max}
+-
+\min\left(\frac{k}{K},1\right)
+\left(\tau_{\max}-\tau_{\min}\right),
+\end{equation}
+其中 $\tau_{\max}$ 和 $\tau_{\min}$ 分别为课程开始和结束时的误差容忍度，$K$ 为课程总阶段数。该机制使策略先学会基本平衡，再逐步提高模仿精度。
+
+\subsection{参考状态初始化}[Reference state initialization]
+
+若每个回合都从动作第一帧开始训练，长序列动作的后半段将较难被充分采样。为此，本文采用参考状态初始化（Reference State Initialization, RSI）机制\cite{deepmimic2018}。具体地，在回合开始时随机采样初始相位
+\begin{equation}
+\phi_0\sim\mathcal{U}(0,1),
+\end{equation}
+再根据相位映射到参考轨迹帧索引
+\begin{equation}
+t_0=\left\lfloor \phi_0(T-1)\right\rfloor,
+\end{equation}
+并使用第 $t_0$ 帧对应的根位姿、关节角和关节速度初始化机器人状态。该机制可以显著提升策略对中间关键动作片段的学习效率，特别适用于腾空、落地和快速转向等高动态动作。
+
+\subsection{域随机化与训练鲁棒性}[Domain randomization]
+
+为了提升策略对动力学参数扰动和传感噪声的适应能力，本文在训练阶段对部分环境参数进行随机化处理。设随机化参数集合为
+\begin{equation}
+\xi\sim p(\xi),
+\end{equation}
+则环境转移可改写为
+\begin{equation}
+s_{t+1}
+=
+f^{\mathrm{sim}}(s_t,\tau_t;\xi),
+\end{equation}
+其中 $\xi$ 可包含连杆质量扰动、摩擦系数、控制延迟、观测噪声和外部推力等因素。域随机化不会替代主任务奖励，而是通过在训练阶段扩大环境分布，提高策略在不同场景中的泛化能力。
+
+\subsection{轨迹闭环与数据回收}[Trajectory loop and data reuse]
+
+当策略训练逐渐收敛后，可以对闭环执行过程进行轨迹采集，记录机器人状态、策略动作和运动学参量，并将其重新封装为标准化轨迹文件。该过程相当于在原始专家轨迹之外，再生成一批经过物理环境约束修正后的闭环执行轨迹。记闭环采集得到的数据为
+\begin{equation}
+\mathcal{D}_{\mathrm{loop}}
+=
+\left\{
+s_t,a_t,\tau_t,\mathcal{X}_t
+\right\}_{t=1}^{T},
+\end{equation}
+则其既可用于后续离线分析，也可作为补充轨迹帮助检查原始参考动作与真实闭环执行之间的偏差。该机制对于分析动作失败原因、观察落地缓冲行为和优化奖励权重具有重要作用。
+
+\section{本章小结}[Summary]
+
+本章围绕基于强化学习的人形机器人动作跟踪方法展开。首先，本文构建了相位条件状态表示，将本体感知信息与动作相位共同作为策略输入；其次，利用非对称 Actor-Critic 结构和 PPO 算法实现稳定训练，并通过 PD 控制器将策略输出映射为可执行关节控制信号；然后，围绕刚体位置、根姿态、关节角和关节速度设计多模态模仿奖励，并加入动作平滑和力矩惩罚项保证训练稳定性；最后，引入终止课程学习、参考状态初始化和域随机化等机制，提高高动态动作学习效率和策略泛化能力。这些设计共同构成了本文动作跟踪方法的核心，为下一章实验设计与结果分析提供方法基础。

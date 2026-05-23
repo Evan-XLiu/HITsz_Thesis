@@ -1,0 +1,77 @@
+% !Mode:: "TeX:UTF-8"
+
+\hitsetup{
+  %******************************
+  % 注意：
+  %   1. 配置里面不要出现空行
+  %   2. 不需要的配置信息可以删除
+  %******************************
+  %
+  design = false, 
+  %=====
+  % 秘级
+  %=====
+  statesecrets={公开},
+  natclassifiedindex={TM301.2},
+  intclassifiedindex={62-5},
+  %
+  %=========
+  % 中文信息
+  %=========
+  ctitleone={基于强化学习的人形机器人},%本科生封面使用
+  ctitletwo={运动技能学习与泛化研究},%本科生封面使用
+  ctitlecover={基于强化学习的人形机器人运动技能学习与泛化研究},%放在封面中使用，自由断行
+  ctitle={基于强化学习的人形机器人运动技能学习与泛化研究},%放在原创性声明中使用
+  cxueke={工学},
+  csubject={自动化},
+  caffil={深圳校区机器人与先进制造学院},
+  cauthor={刘轩伟},
+  csupervisor={奚月平},
+  % ccosupervisor={某某某教授}, % 联合指导老师
+  % 如果是第一封面的日期要手动设置，需要取消注释下一行，并将内容改为“规范”中要求的封面第一页最下方的日期
+  firstpagecdate={2026年5月},
+  % 日期自动使用当前时间，若需指定按如下方式修改：
+  cdate={2026年5月},
+  cstudentid={220320110},
+  cstudenttype={本科毕业设计（论文）},
+  cnumber={no9527}, %编号
+  cpositionname={哈铁西站}, %博士后站名称
+  cfinishdate={20XX年X月---20XX年X月}, %到站日期
+  csubmitdate={20XX年X月}, %出站日期
+  cstartdate={3050年9月10日}, %到站日期
+  cenddate={3090年10月10日}, %出站日期
+  %（同等学力人员）、（工程硕士）、（工商管理硕士）、
+  %（高级管理人员工商管理硕士）、（公共管理硕士）、（中职教师）、（高校教师）等
+  %
+  %
+  %=========
+  % 英文信息
+  %=========
+  etitle={Research on Humanoid Robot Motion Skill Learning and Generalization Based on Reinforcement Learning},
+  exueke={Engineering},
+  esubject={Automation},
+  eaffil={School of Robotics and Advanced Manufacturing},
+  eauthor={Xuanwei Liu},
+  esupervisor={Yueping Xi},
+  % 日期自动生成，若需指定按如下方式修改：
+  edate={May, 2026},
+  estudenttype={Bachelor Thesis},
+  %
+  % 关键词用“英文逗号”分割，ckeywords中填写中文关键词，ekeywords中填写英文关键词
+  ckeywords={人形机器人, 强化学习, 动作重定向, 动作学习},
+  ekeywords={humanoid robot, reinforcement learning, motion retargeting, motion learning},
+}
+
+\begin{cabstract}
+
+人形机器人具备与人类相似的运动结构，在复杂环境作业、服务机器人和具身智能等场景中具有重要应用价值。然而，人形机器人自由度高、接触动力学复杂，传统控制方法难以直接获得兼具敏捷性、稳定性与泛化能力的全身运动技能。针对上述问题，本文围绕“专家数据预处理、动作重定向、强化学习动作跟踪与泛化测试”的技术流程，研究基于强化学习的人形机器人运动技能学习方法。
+
+本文首先基于公开人体运动捕捉数据构建专家运动数据处理流程，通过人体模型与目标机器人之间的关键点拓扑映射、体型拟合、逐帧动作重定向和时序平滑，将人体运动序列转换为机器人可执行的关节空间参考轨迹；随后，在 Isaac Gym/MuJoCo 仿真环境中构建人形机器人整身动作跟踪任务，引入基于相位的参考状态表示、多模态轨迹误差度量和高斯核奖励函数，并采用近端策略优化算法训练控制策略；最后，针对高动态动作训练中容易出现的局部最优、物理约束冲突和策略保守化问题，设计参考状态初始化、动作偏离终止课程和安全正则项，以提升策略收敛效率和动作物理可行性。实验与阶段性结果表明，所构建的数据处理与强化学习训练框架能够完成多类人体动作到人形机器人的轨迹迁移，并使策略在仿真中跟踪给定参考动作，为后续跨仿真平台验证和复杂场景下的运动技能泛化奠定了基础。
+\end{cabstract}
+
+
+\begin{eabstract}
+Humanoid robots have human-like kinematic structures and show broad application potential in complex operations, service robotics, and embodied intelligence. However, due to their high degrees of freedom and complex contact dynamics, conventional control methods find it difficult to directly acquire whole-body motion skills that are agile, stable, and generalizable. To address this problem, this thesis studies a reinforcement-learning-based method for humanoid robot motion skill learning following the technical pipeline of expert data preprocessing, motion retargeting, reinforcement-learning-based motion tracking, and generalization evaluation.
+
+First, a motion data processing pipeline is constructed based on public human motion capture data. Through keypoint topology mapping between the human body model and the target robot, body shape fitting, frame-wise motion retargeting, and temporal smoothing, human motion sequences are converted into executable joint-space reference trajectories for the robot. Then, a whole-body motion tracking task is constructed in the Isaac Gym/MuJoCo simulation environment, where phase-based reference state representation, multimodal trajectory error metrics, and Gaussian-kernel reward functions are introduced, and the control policy is trained using the Proximal Policy Optimization algorithm. Finally, to address local optima, conflicts with physical constraints, and overly conservative policies that often arise in highly dynamic motion training, reference state initialization, a motion-deviation termination curriculum, and safety regularization terms are designed to improve convergence efficiency and physical feasibility. Experimental and preliminary results show that the proposed data processing and reinforcement learning framework can accomplish trajectory transfer from multiple categories of human motions to a humanoid robot and enable the policy to track given reference motions in simulation, laying a foundation for subsequent cross-simulator validation and motion skill generalization in complex scenarios.
+\end{eabstract}
